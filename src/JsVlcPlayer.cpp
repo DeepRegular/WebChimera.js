@@ -73,6 +73,10 @@ JsVlcPlayer::ContextData::~ContextData()
 ///////////////////////////////////////////////////////////////////////////////
 struct JsVlcPlayer::AsyncData
 {
+    // Deleted through unique_ptr<AsyncData>. Without this the derived members
+    // leak and the sized operator delete gets sizeof(AsyncData), which
+    // Chromium's PartitionAlloc (Electron's malloc) rejects with a trap.
+    virtual ~AsyncData() = default;
     virtual void process(JsVlcPlayer*) = 0;
 };
 
@@ -139,15 +143,15 @@ void JsVlcPlayer::LibvlcLogEvent::process(JsVlcPlayer* jsPlayer)
 
 ///////////////////////////////////////////////////////////////////////////////
 #define SET_CALLBACK_PROPERTY(objTemplate, name, callback)                                                      \
-    objTemplate->SetAccessor(String::NewFromUtf8(Isolate::GetCurrent(), name, v8::NewStringType::kInternalized).ToLocalChecked(), \
-        [] (v8::Local<v8::String> property,                                                                     \
+    objTemplate->SetNativeDataProperty(String::NewFromUtf8(Isolate::GetCurrent(), name, v8::NewStringType::kInternalized).ToLocalChecked(), \
+        [] (v8::Local<v8::Name> property,                                                                       \
             const v8::PropertyCallbackInfo<v8::Value>& info)                                                    \
         {                                                                                                       \
             JsVlcPlayer::getJsCallback(property, info, callback);                                               \
         },                                                                                                      \
-        [] (v8::Local<v8::String> property,                                                                     \
+        [] (v8::Local<v8::Name> property,                                                                       \
             v8::Local<v8::Value> value,                                                                         \
-             const v8::PropertyCallbackInfo<void>& info)                                                        \
+             const v8::PropertyCallbackInfo<v8::Boolean>& info)                                                 \
         {                                                                                                       \
             JsVlcPlayer::setJsCallback(property, value, info, callback);                                        \
         })
@@ -159,11 +163,11 @@ void JsVlcPlayer::initJsApi(
 {
     using namespace v8;
 
-    Isolate* isolate = context->GetIsolate();
+    Isolate* isolate = Isolate::GetCurrent();
     ContextData* contextData =
         new ContextData(
             Local<Object>::Cast(thisModule));
-    Local<External> externalContextData = External::New(isolate, contextData);
+    Local<External> externalContextData = External::New(isolate, contextData, kExternalPointerTypeTagDefault);
     node::AddEnvironmentCleanupHook(
         isolate,
         [] (void* contextData) {
@@ -333,7 +337,7 @@ void JsVlcPlayer::jsCreate(const v8::FunctionCallbackInfo<v8::Value>& args)
     Isolate* isolate = Isolate::GetCurrent();
     Local<Context> context = isolate->GetCurrentContext();
 
-    Local<Object> thisObject = args.Holder();
+    Local<Object> thisObject = args.This();
     if(args.IsConstructCall()) {
         Local<Array> options;
         if(args.Length() == 1 && args[0]->IsArray()) {
@@ -341,7 +345,7 @@ void JsVlcPlayer::jsCreate(const v8::FunctionCallbackInfo<v8::Value>& args)
         }
 
         ContextData* contextData =
-            static_cast<ContextData*>(args.Data().As<External>()->Value());
+            static_cast<ContextData*>(args.Data().As<External>()->Value(kExternalPointerTypeTagDefault));
 
         JsVlcPlayer* jsPlayer = new JsVlcPlayer(thisObject, options, contextData);
         args.GetReturnValue().Set(jsPlayer->handle());
@@ -373,8 +377,10 @@ JsVlcPlayer::JsVlcPlayer(
 
     uv_async_init(loop, &_async,
         [] (uv_async_t* handle) {
-            if(handle->data)
-                reinterpret_cast<JsVlcPlayer*>(handle->data)->handleAsync();
+            if(handle->data) {
+                JsVlcPlayer* player = reinterpret_cast<JsVlcPlayer*>(handle->data);
+                player->runInContext([player] () { player->handleAsync(); });
+            }
         }
   );
     _async.data = this;
@@ -384,6 +390,7 @@ JsVlcPlayer::JsVlcPlayer(
 
     Isolate* isolate = Isolate::GetCurrent();
     Local<Context> context = isolate->GetCurrentContext();
+    _context.Reset(isolate, context);
 
     Local<Object> thisModule =
         Local<Object>::New(Isolate::GetCurrent(), contextData->thisModule);
@@ -536,6 +543,27 @@ void JsVlcPlayer::log_event(
     _asyncDataGuard.unlock();
 
     uv_async_send(&_async);
+}
+
+template<typename F>
+void JsVlcPlayer::runInContext(F&& f)
+{
+    using namespace v8;
+
+    Isolate* isolate = Isolate::GetCurrent();
+    HandleScope scope(isolate);
+    Context::Scope contextScope(_context.Get(isolate));
+    // Lets Node drain microtasks and the nextTick queue when we are done,
+    // as it would after any other async callback. Calling into JS without
+    // it trips a CHECK in Electron's renderer.
+    node::CallbackScope callbackScope(isolate, handle(), node::async_context{0, 0});
+
+    f();
+}
+
+void JsVlcPlayer::dispatchVideoEvents()
+{
+    runInContext([this] () { handleVideoEvents(); });
 }
 
 void JsVlcPlayer::handleAsync()
@@ -763,8 +791,10 @@ void JsVlcPlayer::handleLibvlcEvent(const libvlc_event_t& libvlcEvent)
             //to not break playlist ligic.
             uv_timer_start(&_errorTimer,
                 [] (uv_timer_t* handle) {
-                    if(handle->data)
-                        static_cast<JsVlcPlayer*>(handle->data)->currentItemEndReached();
+                    if(handle->data) {
+                        JsVlcPlayer* player = static_cast<JsVlcPlayer*>(handle->data);
+                        player->runInContext([player] () { player->currentItemEndReached(); });
+                    }
                 }, 1000, 0);
             break;
         case libvlc_MediaPlayerTimeChanged: {
@@ -840,33 +870,48 @@ void JsVlcPlayer::callCallback(
     if(list.size() > 0)
         argList.insert(argList.end(), list);
 
+    // These run from libuv with no JS caller to hand an exception to. A
+    // throwing listener used to hit ToLocalChecked() and take the whole
+    // renderer down; report it and carry on instead.
+    TryCatch tryCatch(isolate);
+    auto report = [&] (const char* where) {
+        if(!tryCatch.HasCaught())
+            return;
+        String::Utf8Value message(isolate, tryCatch.Exception());
+        fprintf(stderr, "WebChimera.js: %s %s threw: %s\n",
+            callbackNames[callback], where, *message ? *message : "(unknown)");
+        tryCatch.Reset();
+    };
+
     if(!_jsCallbacks[callback].IsEmpty()) {
         Local<Function> callbackFunc =
             Local<Function>::New(isolate, _jsCallbacks[callback]);
 
-        callbackFunc->Call(
+        (void) callbackFunc->Call(
             context,
             handle(),
-            static_cast<int>(argList.size() - 1), argList.data() + 1).ToLocalChecked();
+            static_cast<int>(argList.size() - 1), argList.data() + 1);
+        report("callback");
     }
 
     Local<Object> eventEmitter = getEventEmitter();
 
-    Local<Function> emitFunction =
-        Local<Function>::Cast(
-            eventEmitter->Get(
-                context,
-                String::NewFromUtf8(isolate, "emit", NewStringType::kInternalized).ToLocalChecked()
-            ).ToLocalChecked());
-
-    auto eNull = emitFunction->IsNullOrUndefined();
-    if(!emitFunction->IsNullOrUndefined()) {
-        emitFunction->Call(
+    Local<Value> emitValue;
+    if(!eventEmitter->Get(
             context,
-            eventEmitter,
-            static_cast<int>(argList.size()),
-            argList.data()).ToLocalChecked();
+            String::NewFromUtf8(isolate, "emit", NewStringType::kInternalized).ToLocalChecked()
+        ).ToLocal(&emitValue) || !emitValue->IsFunction()) {
+        report("emit lookup");
+        return;
     }
+    Local<Function> emitFunction = Local<Function>::Cast(emitValue);
+
+    (void) emitFunction->Call(
+        context,
+        eventEmitter,
+        static_cast<int>(argList.size()),
+        argList.data());
+    report("emit");
 }
 
 void JsVlcPlayer::jsPlay(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -875,7 +920,7 @@ void JsVlcPlayer::jsPlay(const v8::FunctionCallbackInfo<v8::Value>& args)
     Isolate* isolate = Isolate::GetCurrent();
     Local<Context> context = isolate->GetCurrentContext();
 
-    JsVlcPlayer* jsPlayer = ObjectWrap::Unwrap<JsVlcPlayer>(args.Holder());
+    JsVlcPlayer* jsPlayer = ObjectWrap::Unwrap<JsVlcPlayer>(args.This());
 
     if(args.Length() == 0) {
         jsPlayer->play();
@@ -888,7 +933,7 @@ void JsVlcPlayer::jsPlay(const v8::FunctionCallbackInfo<v8::Value>& args)
 }
 
 void JsVlcPlayer::getJsCallback(
-    v8::Local<v8::String> property,
+    v8::Local<v8::Name> property,
     const v8::PropertyCallbackInfo<v8::Value>& info,
     Callbacks_e callback)
 {
@@ -909,9 +954,9 @@ void JsVlcPlayer::getJsCallback(
 }
 
 void JsVlcPlayer::setJsCallback(
-    v8::Local<v8::String> property,
+    v8::Local<v8::Name> property,
     v8::Local<v8::Value> value,
-    const v8::PropertyCallbackInfo<void>& info,
+    const v8::PropertyCallbackInfo<v8::Boolean>& info,
     Callbacks_e callback)
 {
     using namespace v8;

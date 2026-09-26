@@ -97,7 +97,7 @@ void CallMethod(
     Isolate* isolate = Isolate::GetCurrent();
     HandleScope scope(isolate);
 
-    C* instance = node::ObjectWrap::Unwrap<C>(info.Holder());
+    C* instance = node::ObjectWrap::Unwrap<C>(info.This());
 
     (instance->*method) (
         FromJsValue<
@@ -116,7 +116,7 @@ void CallMethod(
     Isolate* isolate = Isolate::GetCurrent();
     HandleScope scope(isolate);
 
-    C* instance = node::ObjectWrap::Unwrap<C>(info.Holder());
+    C* instance = node::ObjectWrap::Unwrap<C>(info.This());
 
     info.GetReturnValue().Set(
         ToJsValue(
@@ -155,7 +155,7 @@ template<typename C, typename V>
 void SetPropertyValue(
     void (C::* setter) (V),
     v8::Local<v8::Value> value,
-    const v8::PropertyCallbackInfo<void>& info)
+    const v8::PropertyCallbackInfo<v8::Boolean>& info)
 {
     using namespace v8;
 
@@ -193,9 +193,9 @@ void GetIndexedPropertyValue(
     )
 
 #define SET_RO_PROPERTY(objTemplate, name, member)                                         \
-    objTemplate->SetAccessor(                                                              \
+    objTemplate->SetNativeDataProperty(                                                    \
         String::NewFromUtf8(Isolate::GetCurrent(), name, v8::NewStringType::kInternalized).ToLocalChecked(), \
-        [] (v8::Local<v8::String> /*property*/,                                            \
+        [] (v8::Local<v8::Name> /*property*/,                                              \
             const v8::PropertyCallbackInfo<v8::Value>& info)                               \
         {                                                                                  \
             GetPropertyValue(member, info);                                                \
@@ -203,16 +203,16 @@ void GetIndexedPropertyValue(
    )
 
 #define SET_RW_PROPERTY(objTemplate, name, getter, setter)                                 \
-    objTemplate->SetAccessor(                                                              \
+    objTemplate->SetNativeDataProperty(                                                    \
         String::NewFromUtf8(Isolate::GetCurrent(), name, v8::NewStringType::kInternalized).ToLocalChecked(), \
-        [] (v8::Local<v8::String> /*property*/,                                            \
+        [] (v8::Local<v8::Name> /*property*/,                                              \
             const v8::PropertyCallbackInfo<v8::Value>& info)                               \
         {                                                                                  \
             GetPropertyValue(getter, info);                                                \
         },                                                                                 \
-        [] (v8::Local<v8::String> /*property*/,                                            \
+        [] (v8::Local<v8::Name> /*property*/,                                              \
              v8::Local<v8::Value> value,                                                   \
-             const v8::PropertyCallbackInfo<void>& info)                                   \
+             const v8::PropertyCallbackInfo<v8::Boolean>& info)                            \
         {                                                                                  \
             SetPropertyValue(setter, value, info);                                         \
         }                                                                                  \
@@ -222,11 +222,12 @@ v8::Local<v8::Object> Require(
     const v8::Local<v8::Object>& thisModule,
     const char* module);
 
-#define SET_RO_INDEXED_PROPERTY(objTemplate, member)         \
-    objTemplate->SetIndexedPropertyHandler(                  \
-        [] (uint32_t index,                                  \
-            const v8::PropertyCallbackInfo<v8::Value>& info) \
-        {                                                    \
-            GetIndexedPropertyValue(member, index, info);    \
-        }                                                    \
-    )
+#define SET_RO_INDEXED_PROPERTY(objTemplate, member)                   \
+    objTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(   \
+        [] (uint32_t index,                                            \
+            const v8::PropertyCallbackInfo<v8::Value>& info)           \
+        {                                                              \
+            GetIndexedPropertyValue(member, index, info);              \
+            return v8::Intercepted::kYes;                              \
+        }                                                              \
+    ))

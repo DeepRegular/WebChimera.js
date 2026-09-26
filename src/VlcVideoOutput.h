@@ -43,14 +43,17 @@ protected:
     //will reset current flag state
     bool isFrameReady();
 
+    //called from libuv; override to set up whatever handleVideoEvents() needs
+    virtual void dispatchVideoEvents()
+        { handleVideoEvents(); }
+    void handleVideoEvents();
+
 private:
     struct VideoEvent;
     struct RV32FrameSetupEvent;
     struct I420FrameSetupEvent;
     struct FrameReadyEvent;
     struct FrameCleanupEvent;
-
-    void handleAsync();
 
 private:
     unsigned video_format_cb(

@@ -65,7 +65,7 @@ void JsVlcVideo::jsCreate(const v8::FunctionCallbackInfo<v8::Value>& args)
     Isolate* isolate = Isolate::GetCurrent();
     Local<Context> context = isolate->GetCurrentContext();
 
-    Local<Object> thisObject = args.Holder();
+    Local<Object> thisObject = args.This();
     if(args.IsConstructCall() && thisObject->InternalFieldCount() > 0) {
         JsVlcPlayer* jsPlayer =
             ObjectWrap::Unwrap<JsVlcPlayer>(Handle<Object>::Cast(args[0]));

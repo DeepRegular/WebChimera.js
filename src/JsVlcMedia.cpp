@@ -77,7 +77,7 @@ v8::Local<v8::Object> JsVlcMedia::create(
 
     Local<Value> argv[] = {
         player.handle(),
-        External::New(isolate, const_cast<vlc::media*>(&media))
+        External::New(isolate, const_cast<vlc::media*>(&media), kExternalPointerTypeTagDefault)
     };
 
     return
@@ -96,13 +96,13 @@ void JsVlcMedia::jsCreate(const v8::FunctionCallbackInfo<v8::Value>& args)
     Local<Context> context = isolate->GetCurrentContext();
     HandleScope scope(isolate);
 
-    Local<Object> thisObject = args.Holder();
+    Local<Object> thisObject = args.This();
     if(args.IsConstructCall() && thisObject->InternalFieldCount() > 0) {
         JsVlcPlayer* jsPlayer =
             ObjectWrap::Unwrap<JsVlcPlayer>(Local<Object>::Cast(args[0]));
 
         const vlc::media* media =
-            static_cast<const vlc::media*>(Local<External>::Cast(args[1])->Value());
+            static_cast<const vlc::media*>(Local<External>::Cast(args[1])->Value(kExternalPointerTypeTagDefault));
 
         if(jsPlayer && media) {
             JsVlcMedia* jsPlaylist = new JsVlcMedia(thisObject, jsPlayer, *media);

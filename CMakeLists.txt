@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.1)
 
 project(WebChimera.js)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
@@ -39,12 +39,20 @@ if(WIN32)
         )
 endif()
 
+# cmake-js does not pass the V8 build flags that node-gyp takes from Electron's
+# common.gypi/config.gypi, and the inline code in the V8 headers depends on
+# them. Without V8_ENABLE_SANDBOX, ObjectWrap::Unwrap reads the sandboxed
+# handle in the internal field as a raw pointer and crashes. These match
+# Electron's config.gypi (pointer compression without a shared cage, sandbox,
+# external code space).
 if(NOT WIN32 OR ${NODE_ARCH} STREQUAL "x64")
     target_compile_definitions(${PROJECT_NAME}
         PUBLIC
         V8_31BIT_SMIS_ON_64BIT_ARCH
         V8_COMPRESS_POINTERS
-        V8_REVERSE_JSARGS
+        V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+        V8_ENABLE_SANDBOX
+        V8_EXTERNAL_CODE_SPACE
         )
 endif()
 

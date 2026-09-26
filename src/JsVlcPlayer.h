@@ -57,13 +57,13 @@ public:
     static void jsPlay(const v8::FunctionCallbackInfo<v8::Value>& args);
 
     static void getJsCallback(
-        v8::Local<v8::String> property,
+        v8::Local<v8::Name> property,
         const v8::PropertyCallbackInfo<v8::Value>& info,
         Callbacks_e callback);
     static void setJsCallback(
-        v8::Local<v8::String> property,
+        v8::Local<v8::Name> property,
         v8::Local<v8::Value> value,
-        const v8::PropertyCallbackInfo<void>& info,
+        const v8::PropertyCallbackInfo<v8::Boolean>& info,
         Callbacks_e callback);
 
     bool playing();
@@ -124,6 +124,7 @@ private:
     void initLibvlc(const v8::Local<v8::Array>& vlcOpts);
 
     void handleAsync();
+    void dispatchVideoEvents() override;
 
     //could come from worker thread
     void media_player_event(const libvlc_event_t*);
@@ -150,6 +151,12 @@ private:
     static v8::Persistent<v8::Function> _jsConstructor;
 
     ContextData *const _contextData;
+
+    // libuv callbacks run outside any HandleScope/Context in plain Node,
+    // so enter the context the player was created in before touching V8.
+    v8::Global<v8::Context> _context;
+    template<typename F>
+    void runInContext(F&& f);
 
     libvlc_instance_t* _libvlc;
     vlc::player _player;

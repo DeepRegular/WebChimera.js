@@ -158,6 +158,8 @@ void VlcVideoOutput::I420VideoFrame::fillBlack()
 ///////////////////////////////////////////////////////////////////////////////
 struct VlcVideoOutput::VideoEvent
 {
+    // Deleted through unique_ptr<VideoEvent>; see JsVlcPlayer::AsyncData.
+    virtual ~VideoEvent() = default;
     virtual void process(VlcVideoOutput*) = 0;
 };
 
@@ -248,7 +250,7 @@ VlcVideoOutput::VlcVideoOutput() :
     uv_async_init(loop, &_async,
         [] (uv_async_t* handle) {
             if(handle->data)
-                reinterpret_cast<VlcVideoOutput*>(handle->data)->handleAsync();
+                reinterpret_cast<VlcVideoOutput*>(handle->data)->dispatchVideoEvents();
         }
    );
     _async.data = this;
@@ -334,7 +336,7 @@ void VlcVideoOutput::notifyFrameReady()
     uv_async_send(&_async);
 }
 
-void VlcVideoOutput::handleAsync()
+void VlcVideoOutput::handleVideoEvents()
 {
     while(!_videoEvents.empty()) {
         std::deque<std::unique_ptr<VideoEvent> > tmpEvents;
